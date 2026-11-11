@@ -243,6 +243,19 @@ public abstract class AuthenticationMethod {
     }
 
     /**
+     * Gets the URL of the login page of the web application, if the authentication method has one.
+     *
+     * <p>Used, for example, to detect when a request is redirected to the login page, which
+     * indicates the authentication session is no longer valid.
+     *
+     * @return the URL of the login page, or {@code null} if not applicable.
+     * @since 2.18.0
+     */
+    public String getLoginPageUrl() {
+        return null;
+    }
+
+    /**
      * Sets the {@link VerificationMethod} that handles authentication state checking for this
      * authentication method.
      *

@@ -27,7 +27,10 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -38,6 +41,7 @@ import java.io.IOException;
 import java.security.InvalidParameterException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.apache.commons.configuration.Configuration;
 import org.apache.commons.httpclient.URI;
@@ -56,11 +60,15 @@ import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMalformedHeaderException;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpRequestHeader;
+import org.parosproxy.paros.network.HttpResponseHeader;
 import org.parosproxy.paros.network.HttpSender;
+import org.zaproxy.zap.authentication.AuthenticationMethod;
 import org.zaproxy.zap.control.AddOn;
 import org.zaproxy.zap.extension.custompages.CustomPage;
+import org.zaproxy.zap.model.Context;
 import org.zaproxy.zap.model.TechSet;
 import org.zaproxy.zap.network.HttpRequestBody;
+import org.zaproxy.zap.users.User;
 import org.zaproxy.zap.utils.I18N;
 import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
@@ -2091,6 +2099,131 @@ class AbstractPluginUnitTest extends PluginTestUtils {
         plugin.sendAndReceive(message, true, true);
         // Then
         assertThat(message.getRequestHeader().getHeader(HttpHeader.X_ZAP_SCAN_ID), is(nullValue()));
+    }
+
+    @Test
+    void shouldRetryRequestWhenSessionRefreshedDuringScan() throws Exception {
+        // Given
+        AbstractPlugin plugin = createDefaultPlugin();
+        ScannerParam scannerParam = mock(ScannerParam.class);
+        given(parent.getScannerParam()).willReturn(scannerParam);
+        HttpSender httpSender = mock(HttpSender.class);
+        given(parent.getHttpSender()).willReturn(httpSender);
+        AuthGenerationManager authManager = new AuthGenerationManager(mockScanUser(), () -> true);
+        given(parent.getAuthGenerationManager()).willReturn(authManager);
+        AtomicInteger sends = new AtomicInteger();
+        doAnswer(
+                        invocation -> {
+                            HttpMessage msg = invocation.getArgument(0);
+                            int statusCode = sends.getAndIncrement() == 0 ? 401 : 200;
+                            msg.setResponseHeader(responseHeader(statusCode));
+                            return null;
+                        })
+                .when(httpSender)
+                .sendAndReceive(any(HttpMessage.class), anyBoolean());
+        HttpMessage message = new HttpMessage(new URI("http://example.com/", true));
+        plugin.init(message, parent);
+        // When
+        plugin.sendAndReceive(message, false, true);
+        // Then
+        assertThat(sends.get(), is(equalTo(2)));
+        assertThat(authManager.getGeneration(), is(equalTo(1L)));
+    }
+
+    @Test
+    void shouldStopNonReplayableRequestWhenSessionRefreshedDuringScan() throws Exception {
+        // Given
+        AbstractPlugin plugin = createDefaultPlugin();
+        ScannerParam scannerParam = mock(ScannerParam.class);
+        given(parent.getScannerParam()).willReturn(scannerParam);
+        HttpSender httpSender = mock(HttpSender.class);
+        given(parent.getHttpSender()).willReturn(httpSender);
+        AuthGenerationManager authManager = new AuthGenerationManager(mockScanUser(), () -> true);
+        given(parent.getAuthGenerationManager()).willReturn(authManager);
+        AtomicInteger sends = new AtomicInteger();
+        doAnswer(
+                        invocation -> {
+                            HttpMessage msg = invocation.getArgument(0);
+                            sends.incrementAndGet();
+                            msg.setResponseHeader(responseHeader(401));
+                            return null;
+                        })
+                .when(httpSender)
+                .sendAndReceive(any(HttpMessage.class), anyBoolean());
+        HttpMessage message = new HttpMessage(new URI("http://example.com/", true));
+        message.getRequestHeader().setMethod(HttpRequestHeader.POST);
+        plugin.init(message, parent);
+        // When / Then
+        assertThrows(AuthSessionException.class, () -> plugin.sendAndReceive(message, false, true));
+        assertThat(sends.get(), is(equalTo(1)));
+    }
+
+    @Test
+    void shouldStopRequestWhenSessionRefreshFailsDuringScan() throws Exception {
+        // Given
+        AbstractPlugin plugin = createDefaultPlugin();
+        ScannerParam scannerParam = mock(ScannerParam.class);
+        given(parent.getScannerParam()).willReturn(scannerParam);
+        HttpSender httpSender = mock(HttpSender.class);
+        given(parent.getHttpSender()).willReturn(httpSender);
+        AuthGenerationManager authManager = new AuthGenerationManager(mockScanUser(), () -> false);
+        given(parent.getAuthGenerationManager()).willReturn(authManager);
+        doAnswer(
+                        invocation -> {
+                            HttpMessage msg = invocation.getArgument(0);
+                            msg.setResponseHeader(responseHeader(401));
+                            return null;
+                        })
+                .when(httpSender)
+                .sendAndReceive(any(HttpMessage.class), anyBoolean());
+        HttpMessage message = new HttpMessage(new URI("http://example.com/", true));
+        plugin.init(message, parent);
+        // When / Then
+        assertThrows(AuthSessionException.class, () -> plugin.sendAndReceive(message, false, true));
+    }
+
+    @Test
+    void shouldNotRetryRequestWhenAuthNotEnabled() throws Exception {
+        // Given
+        AbstractPlugin plugin = createDefaultPlugin();
+        ScannerParam scannerParam = mock(ScannerParam.class);
+        given(parent.getScannerParam()).willReturn(scannerParam);
+        HttpSender httpSender = mock(HttpSender.class);
+        given(parent.getHttpSender()).willReturn(httpSender);
+        given(parent.getAuthGenerationManager()).willReturn(new AuthGenerationManager((User) null));
+        AtomicInteger sends = new AtomicInteger();
+        doAnswer(
+                        invocation -> {
+                            HttpMessage msg = invocation.getArgument(0);
+                            sends.incrementAndGet();
+                            msg.setResponseHeader(responseHeader(401));
+                            return null;
+                        })
+                .when(httpSender)
+                .sendAndReceive(any(HttpMessage.class), anyBoolean());
+        HttpMessage message = new HttpMessage(new URI("http://example.com/", true));
+        plugin.init(message, parent);
+        // When
+        plugin.sendAndReceive(message, false, true);
+        // Then no retry nor exception even with an auth error status code
+        assertThat(sends.get(), is(equalTo(1)));
+    }
+
+    private static User mockScanUser() {
+        User user = mock(User.class);
+        Context context = mock(Context.class);
+        AuthenticationMethod authenticationMethod = mock(AuthenticationMethod.class);
+        given(user.getContext()).willReturn(context);
+        given(context.getAuthenticationMethod()).willReturn(authenticationMethod);
+        given(authenticationMethod.isConfigured()).willReturn(true);
+        given(user.isAuthenticated(any())).willReturn(true);
+        return user;
+    }
+
+    private static HttpResponseHeader responseHeader(int statusCode)
+            throws HttpMalformedHeaderException {
+        return new HttpResponseHeader(
+                "HTTP/1.1 " + statusCode + " Reason\r\nContent-Length: 0\r\n\r\n");
     }
 
     @ParameterizedTest

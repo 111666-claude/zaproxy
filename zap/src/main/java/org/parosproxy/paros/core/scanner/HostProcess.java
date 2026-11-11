@@ -171,6 +171,13 @@ public class HostProcess implements Runnable {
     private Context context;
 
     /**
+     * The manager of the authentication generation, created when scanning as a user.
+     *
+     * @see #getAuthGenerationManager()
+     */
+    private volatile AuthGenerationManager authGenerationManager = new AuthGenerationManager(null);
+
+    /**
      * A {@code Map} from plugin IDs to corresponding {@link PluginStats}.
      *
      * @see #processPlugin(Plugin)
@@ -1240,6 +1247,19 @@ public class HostProcess implements Runnable {
         if (httpSender != null) {
             httpSender.setUser(user);
         }
+        this.authGenerationManager = new AuthGenerationManager(user);
+    }
+
+    /**
+     * Gets the manager of the authentication generation, which coordinates the recovery of the
+     * authenticated session while scanning as a user.
+     *
+     * @return the manager, never {@code null}.
+     * @since 2.18.0
+     * @see AuthGenerationManager#isEnabled()
+     */
+    public AuthGenerationManager getAuthGenerationManager() {
+        return authGenerationManager;
     }
 
     /**

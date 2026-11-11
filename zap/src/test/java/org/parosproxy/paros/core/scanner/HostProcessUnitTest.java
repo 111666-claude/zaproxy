@@ -24,6 +24,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -49,6 +50,7 @@ import org.parosproxy.paros.model.HistoryReference;
 import org.parosproxy.paros.model.Model;
 import org.parosproxy.paros.model.OptionsParam;
 import org.parosproxy.paros.network.HttpMessage;
+import org.zaproxy.zap.authentication.AuthenticationMethod;
 import org.zaproxy.zap.extension.ascan.ScanPolicy;
 import org.zaproxy.zap.extension.ascan.filters.FilterResult;
 import org.zaproxy.zap.extension.ascan.filters.ScanFilter;
@@ -57,6 +59,7 @@ import org.zaproxy.zap.extension.ruleconfig.RuleConfigParam;
 import org.zaproxy.zap.model.Context;
 import org.zaproxy.zap.model.StructuralNode;
 import org.zaproxy.zap.model.TechSet;
+import org.zaproxy.zap.users.User;
 import org.zaproxy.zap.utils.I18N;
 
 /** Unit test for {@link HostProcess}. */
@@ -659,6 +662,30 @@ class HostProcessUnitTest {
         // When / Then
         assertFalse(hostProcess.isCustomPage(msg, cpType));
         verifyNoInteractions(context);
+    }
+
+    @Test
+    void shouldHaveDisabledAuthGenerationManagerWhenNoUser() {
+        // When
+        AuthGenerationManager authManager = hostProcess.getAuthGenerationManager();
+        // Then
+        assertThat(authManager, is(notNullValue()));
+        assertThat(authManager.isEnabled(), is(equalTo(false)));
+    }
+
+    @Test
+    void shouldHaveEnabledAuthGenerationManagerWhenUserSet() {
+        // Given
+        User user = mock(User.class);
+        Context context = mock(Context.class);
+        AuthenticationMethod authenticationMethod = mock(AuthenticationMethod.class);
+        given(user.getContext()).willReturn(context);
+        given(context.getAuthenticationMethod()).willReturn(authenticationMethod);
+        given(authenticationMethod.isConfigured()).willReturn(true);
+        // When
+        hostProcess.setUser(user);
+        // Then
+        assertThat(hostProcess.getAuthGenerationManager().isEnabled(), is(equalTo(true)));
     }
 
     private static StructuralNode createLeafNode(String name, String method, String uri) {

@@ -340,6 +340,45 @@ public abstract class AbstractPlugin implements Plugin, Comparable<Object> {
     }
 
     private void sendMessageImpl(HttpMessage message, boolean isFollowRedirect) throws IOException {
+        AuthGenerationManager authManager = getParent().getAuthGenerationManager();
+        if (authManager == null || !authManager.isEnabled()) {
+            send(message, isFollowRedirect);
+            return;
+        }
+
+        long generation = authManager.beforeRequest();
+        send(message, isFollowRedirect);
+        switch (authManager.afterResponse(message, generation)) {
+            case VALID:
+                return;
+            case RETRY:
+                generation = authManager.beforeRequest();
+                send(message, isFollowRedirect);
+                if (authManager.afterResponse(message, generation)
+                        != AuthGenerationManager.ResponseVerdict.VALID) {
+                    throw new AuthSessionException(
+                            "The session is still not authenticated after re-authentication, not"
+                                    + " using the response of: "
+                                    + message.getRequestHeader().getURI());
+                }
+                return;
+            case NOT_REPLAYABLE:
+                throw new AuthSessionException(
+                        "Not replaying request with method "
+                                + message.getRequestHeader().getMethod()
+                                + " after the authentication session was refreshed, it is not safe"
+                                + " to replay: "
+                                + message.getRequestHeader().getURI());
+            case REFRESH_FAILED:
+            default:
+                throw new AuthSessionException(
+                        "The authentication session could not be refreshed, not using the response"
+                                + " of: "
+                                + message.getRequestHeader().getURI());
+        }
+    }
+
+    private void send(HttpMessage message, boolean isFollowRedirect) throws IOException {
         if (isFollowRedirect) {
             parent.getHttpSender().sendAndReceive(message, getParent().getRedirectRequestConfig());
         } else {

@@ -434,6 +434,11 @@ public abstract class PostBasedAuthenticationMethodType extends AuthenticationMe
             return loginRequestURL;
         }
 
+        @Override
+        public String getLoginPageUrl() {
+            return StringUtils.isBlank(loginPageUrl) ? loginRequestURL : loginPageUrl;
+        }
+
         /**
          * Marks the provided Site Login as being a Login request. If {@code null} is provided, no
          * site node will be marked as login request (for the {@link Context} corresponding to this
