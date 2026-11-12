@@ -28,11 +28,11 @@ import java.security.SecureRandom;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -119,7 +119,7 @@ public class API {
 
     private Map<String, ApiImplementor> shortcuts = new HashMap<>();
 
-    private Map<String, Nonce> nonces = Collections.synchronizedMap(new HashMap<>());
+    private final Map<String, Nonce> nonces = new ConcurrentHashMap<>();
 
     /**
      * The options for the API.
@@ -1056,6 +1056,13 @@ public class API {
     /**
      * Returns true if the API call has a valid key
      *
+     * <p>A nonce, when present, takes precedence over the API key: if a nonce is supplied it is the
+     * only credential checked, an invalid nonce does not fall back to the API key check. A one time
+     * nonce is consumed only after it has been fully validated (not expired and bound to the exact
+     * API path being called); requests with a wrong path, an expired nonce, or conflicting
+     * header/query nonce values do not consume it. Consumption is atomic, so concurrent requests
+     * with the same one time nonce succeed at most once.
+     *
      * @param reqHeader the request header
      * @param params the parameters
      * @return true if the API call has a valid key
@@ -1070,26 +1077,30 @@ public class API {
                 LOGGER.error(e.getMessage(), e);
                 return false;
             }
-            String nonceParam = reqHeader.getHeader(HttpHeader.X_ZAP_API_NONCE);
-            if (nonceParam == null && params.has(API_NONCE_PARAM)) {
-                nonceParam = params.getString(API_NONCE_PARAM);
+            String nonceHeader = reqHeader.getHeader(HttpHeader.X_ZAP_API_NONCE);
+            String nonceQuery =
+                    params.has(API_NONCE_PARAM) ? params.getString(API_NONCE_PARAM) : null;
+            if (nonceHeader != null && nonceQuery != null && !nonceHeader.equals(nonceQuery)) {
+                LOGGER.warn(
+                        "API nonce supplied in header and query parameter with different values in request from {}",
+                        reqHeader.getSenderAddress().getHostAddress());
+                return false;
             }
+            String nonceParam = nonceHeader != null ? nonceHeader : nonceQuery;
 
             if (nonceParam != null) {
                 Nonce nonce = nonces.get(nonceParam);
                 if (nonce == null) {
                     LOGGER.warn(
                             "API nonce {} not found in request from {}",
-                            nonceParam,
+                            redact(nonceParam),
                             reqHeader.getSenderAddress().getHostAddress());
                     return false;
-                } else if (nonce.isOneTime()) {
-                    nonces.remove(nonceParam);
                 }
                 if (!nonce.isValid()) {
                     LOGGER.warn(
                             "API nonce {} expired at {} in request from {}",
-                            nonce.getNonceKey(),
+                            redact(nonce.getNonceKey()),
                             nonce.getExpires(),
                             reqHeader.getSenderAddress().getHostAddress());
                     return false;
@@ -1103,6 +1114,15 @@ public class API {
                             reqHeader.getSenderAddress().getHostAddress());
                     return false;
                 }
+
+                if (nonce.isOneTime() && !nonces.remove(nonceParam, nonce)) {
+                    // Another request consumed it first, or it expired and was cleaned up.
+                    LOGGER.warn(
+                            "API nonce {} already consumed in request from {}",
+                            redact(nonceParam),
+                            reqHeader.getSenderAddress().getHostAddress());
+                    return false;
+                }
             } else {
                 String keyParam = reqHeader.getHeader(HttpHeader.X_ZAP_API_KEY);
                 if (keyParam == null && params.has(API_KEY_PARAM)) {
@@ -1111,7 +1131,7 @@ public class API {
                 if (!getOptionsParamApi().getKey().equals(keyParam)) {
                     LOGGER.warn(
                             "API key incorrect or not supplied: {} in request from {}",
-                            keyParam,
+                            redact(keyParam),
                             reqHeader.getSenderAddress().getHostAddress());
                     return false;
                 }
@@ -1119,14 +1139,17 @@ public class API {
 
             return true;
         } finally {
-            synchronized (nonces) {
-                for (Iterator<Nonce> it = nonces.values().iterator(); it.hasNext(); ) {
-                    if (!it.next().isValid()) {
-                        it.remove();
-                    }
-                }
-            }
+            // Remove expired nonces; each removal is atomic so it cannot race with the
+            // conditional consumption above (a nonce removed here was already invalid).
+            nonces.values().removeIf(nonce -> !nonce.isValid());
         }
+    }
+
+    private static String redact(String value) {
+        if (value == null) {
+            return "<none>";
+        }
+        return "<redacted, length=" + value.length() + ">";
     }
 
     public static String getDefaultResponseHeader(String contentType) {

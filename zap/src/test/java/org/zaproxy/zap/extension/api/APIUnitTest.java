@@ -35,7 +35,9 @@ import static org.mockito.Mockito.withSettings;
 import java.net.Inet4Address;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.sf.json.JSON;
 import net.sf.json.JSONObject;
 import org.apache.commons.httpclient.URI;
@@ -372,7 +374,7 @@ class APIUnitTest {
     }
 
     @Test
-    void shouldConsumeButNotAcceptOneTimeApiNonceIfPathMismatch() throws Exception {
+    void shouldNotConsumeNorAcceptOneTimeApiNonceIfPathMismatch() throws Exception {
         // Given
         API api = new API();
         api.setOptionsParamApi(createOptionsParamApi());
@@ -380,21 +382,23 @@ class APIUnitTest {
         String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
         // Then
         assertThat(nonce, is(notNullValue()));
+        // A call for a different path must not consume the still valid nonce
         assertThat(isApiNonceValid(api, "/not/same/path/", nonce), is(equalTo(false)));
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(true)));
+        // But once correctly used it is consumed
         assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(false)));
     }
 
     @Test
     void shouldNotAcceptOneTimeApiNonceIfExpired() throws Exception {
         // Given
-        int ttlInSecs = 1;
+        int ttlInSecs = 0;
         OptionsParamApi optionsParamApi = Mockito.mock(OptionsParamApi.class);
         when(optionsParamApi.getNonceTimeToLiveInSecs()).thenReturn(ttlInSecs);
         API api = new API();
         api.setOptionsParamApi(optionsParamApi);
-        String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
         // When
-        Thread.sleep(TimeUnit.SECONDS.toMillis(ttlInSecs + 1));
+        String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
         // Then
         assertThat(nonce, is(notNullValue()));
         assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(false)));
@@ -403,7 +407,7 @@ class APIUnitTest {
     @Test
     void shouldExpireExistingOneTimeApiNonces() throws Exception {
         // Given
-        int ttlInSecs = 1;
+        int ttlInSecs = 0;
         OptionsParamApi optionsParamApi = Mockito.mock(OptionsParamApi.class);
         when(optionsParamApi.getNonceTimeToLiveInSecs()).thenReturn(ttlInSecs);
         API api = new API();
@@ -411,9 +415,7 @@ class APIUnitTest {
         String nonce1 = api.getOneTimeNonce(CUSTOM_API_PATH + "1");
         String nonce2 = api.getOneTimeNonce(CUSTOM_API_PATH + "2");
         String nonce3 = api.getOneTimeNonce(CUSTOM_API_PATH + "2");
-        // When
-        Thread.sleep(TimeUnit.SECONDS.toMillis(ttlInSecs + 1));
-        // Then
+        // When / Then (all expired as soon as they were created)
         assertThat(isApiNonceValid(api, CUSTOM_API_PATH + "1", nonce1), is(equalTo(false)));
         assertThat(isApiNonceValid(api, CUSTOM_API_PATH + "2", nonce2), is(equalTo(false)));
         assertThat(isApiNonceValid(api, CUSTOM_API_PATH + "3", nonce3), is(equalTo(false)));
@@ -436,15 +438,13 @@ class APIUnitTest {
     @Test
     void shouldNotExpireLongLivedApiNonce() throws Exception {
         // Given
-        int ttlInSecs = 1;
+        int ttlInSecs = 0;
         OptionsParamApi optionsParamApi = Mockito.mock(OptionsParamApi.class);
         when(optionsParamApi.getNonceTimeToLiveInSecs()).thenReturn(ttlInSecs);
         API api = new API();
         api.setOptionsParamApi(optionsParamApi);
         String nonce = api.getLongLivedNonce(CUSTOM_API_PATH);
-        // When
-        Thread.sleep(TimeUnit.SECONDS.toMillis(ttlInSecs + 1));
-        // Then
+        // When / Then (long lived nonces never expire)
         assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(true)));
     }
 
@@ -459,6 +459,200 @@ class APIUnitTest {
         assertThat(nonce, is(notNullValue()));
         assertThat(isApiNonceValid(api, "/not/same/path/", nonce), is(equalTo(false)));
         assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(true)));
+    }
+
+    @Test
+    void shouldAcceptOneTimeApiNonceInQueryParam() throws Exception {
+        // Given
+        API api = new API();
+        api.setOptionsParamApi(createOptionsParamApi());
+        String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
+        JSONObject params = new JSONObject();
+        params.put(API.API_NONCE_PARAM, nonce);
+        // When / Then
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, null, params), is(equalTo(true)));
+        // Consumed by the query param usage
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, null, params), is(equalTo(false)));
+    }
+
+    @Test
+    void shouldRejectAndNotConsumeOneTimeApiNonceIfHeaderAndQueryValuesDiffer() throws Exception {
+        // Given
+        API api = new API();
+        api.setOptionsParamApi(createOptionsParamApi());
+        String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
+        JSONObject params = new JSONObject();
+        params.put(API.API_NONCE_PARAM, "differentNonceValue");
+        // When / Then
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce, params), is(equalTo(false)));
+        // The conflicting request must not have consumed the still valid nonce
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(true)));
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(false)));
+    }
+
+    @Test
+    void shouldAcceptOneTimeApiNonceIfHeaderAndQueryValuesMatch() throws Exception {
+        // Given
+        API api = new API();
+        api.setOptionsParamApi(createOptionsParamApi());
+        String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
+        JSONObject params = new JSONObject();
+        params.put(API.API_NONCE_PARAM, nonce);
+        // When / Then
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce, params), is(equalTo(true)));
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce, params), is(equalTo(false)));
+    }
+
+    @Test
+    void shouldNotAcceptUnknownApiNonce() throws Exception {
+        // Given
+        API api = new API();
+        api.setOptionsParamApi(createOptionsParamApi());
+        String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
+        // When / Then
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, "malformedNonce"), is(equalTo(false)));
+        // The unknown nonce must not affect the still valid one
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(true)));
+    }
+
+    @Test
+    void shouldConsumeOneTimeApiNonceOnlyOnceUnderConcurrentAccess() throws Exception {
+        // Given
+        int threads = 16;
+        API api = new API();
+        api.setOptionsParamApi(createOptionsParamApi());
+        String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+        AtomicInteger validCount = new AtomicInteger();
+        AtomicInteger invalidCount = new AtomicInteger();
+        for (int i = 0; i < threads; i++) {
+            Thread thread =
+                    new Thread(
+                            () -> {
+                                ready.countDown();
+                                try {
+                                    start.await();
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    done.countDown();
+                                    return;
+                                }
+                                if (isApiNonceValid(api, CUSTOM_API_PATH, nonce)) {
+                                    validCount.incrementAndGet();
+                                } else {
+                                    invalidCount.incrementAndGet();
+                                }
+                                done.countDown();
+                            });
+            thread.setDaemon(true);
+            thread.start();
+        }
+        // When
+        assertThat(ready.await(1, TimeUnit.MINUTES), is(equalTo(true)));
+        start.countDown();
+        // Then
+        assertThat(done.await(1, TimeUnit.MINUTES), is(equalTo(true)));
+        assertThat(validCount.get(), is(equalTo(1)));
+        assertThat(invalidCount.get(), is(equalTo(threads - 1)));
+        // And the nonce stays consumed afterwards
+        assertThat(isApiNonceValid(api, CUSTOM_API_PATH, nonce), is(equalTo(false)));
+    }
+
+    @Test
+    void shouldConsumeOneTimeApiNonceOnlyOnceUnderConcurrentAccessWithQueryParam()
+            throws Exception {
+        // Given
+        int threads = 16;
+        API api = new API();
+        api.setOptionsParamApi(createOptionsParamApi());
+        String nonce = api.getOneTimeNonce(CUSTOM_API_PATH);
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+        AtomicInteger validCount = new AtomicInteger();
+        for (int i = 0; i < threads; i++) {
+            JSONObject params = new JSONObject();
+            params.put(API.API_NONCE_PARAM, nonce);
+            Thread thread =
+                    new Thread(
+                            () -> {
+                                ready.countDown();
+                                try {
+                                    start.await();
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    done.countDown();
+                                    return;
+                                }
+                                if (isApiNonceValid(api, CUSTOM_API_PATH, null, params)) {
+                                    validCount.incrementAndGet();
+                                }
+                                done.countDown();
+                            });
+            thread.setDaemon(true);
+            thread.start();
+        }
+        // When
+        assertThat(ready.await(1, TimeUnit.MINUTES), is(equalTo(true)));
+        start.countDown();
+        // Then
+        assertThat(done.await(1, TimeUnit.MINUTES), is(equalTo(true)));
+        assertThat(validCount.get(), is(equalTo(1)));
+    }
+
+    @Test
+    void shouldAcceptValidApiKeyInHeader() throws Exception {
+        // Given
+        OptionsParamApi optionsParamApi = createOptionsParamApi();
+        optionsParamApi.setKey("test-api-key");
+        API api = new API();
+        api.setOptionsParamApi(optionsParamApi);
+        // When / Then
+        assertThat(
+                hasValidApiKey(api, CUSTOM_API_PATH, "test-api-key", new JSONObject()),
+                is(equalTo(true)));
+    }
+
+    @Test
+    void shouldAcceptValidApiKeyInQueryParam() throws Exception {
+        // Given
+        OptionsParamApi optionsParamApi = createOptionsParamApi();
+        optionsParamApi.setKey("test-api-key");
+        API api = new API();
+        api.setOptionsParamApi(optionsParamApi);
+        JSONObject params = new JSONObject();
+        params.put(API.API_KEY_PARAM, "test-api-key");
+        // When / Then
+        assertThat(hasValidApiKey(api, CUSTOM_API_PATH, null, params), is(equalTo(true)));
+    }
+
+    @Test
+    void shouldRejectInvalidApiKey() throws Exception {
+        // Given
+        OptionsParamApi optionsParamApi = createOptionsParamApi();
+        optionsParamApi.setKey("test-api-key");
+        API api = new API();
+        api.setOptionsParamApi(optionsParamApi);
+        // When / Then
+        assertThat(
+                hasValidApiKey(api, CUSTOM_API_PATH, "wrong-api-key", new JSONObject()),
+                is(equalTo(false)));
+    }
+
+    @Test
+    void shouldNotFallBackToApiKeyIfNonceInvalid() throws Exception {
+        // Given
+        OptionsParamApi optionsParamApi = createOptionsParamApi();
+        optionsParamApi.setKey("test-api-key");
+        API api = new API();
+        api.setOptionsParamApi(optionsParamApi);
+        JSONObject params = new JSONObject();
+        params.put(API.API_KEY_PARAM, "test-api-key");
+        // When / Then (an invalid nonce takes precedence and must not fall back to the key)
+        assertThat(
+                isApiNonceValid(api, CUSTOM_API_PATH, "unknownNonce", params), is(equalTo(false)));
     }
 
     @Test
@@ -736,6 +930,21 @@ class APIUnitTest {
     }
 
     private static boolean isApiNonceValid(API api, String requestPath, String nonce) {
+        return isApiNonceValid(api, requestPath, nonce, new JSONObject());
+    }
+
+    private static boolean isApiNonceValid(
+            API api, String requestPath, String nonce, JSONObject params) {
+        return hasValidKey(api, requestPath, nonce, params, null);
+    }
+
+    private static boolean hasValidApiKey(
+            API api, String requestPath, String keyHeader, JSONObject params) {
+        return hasValidKey(api, requestPath, null, params, keyHeader);
+    }
+
+    private static boolean hasValidKey(
+            API api, String requestPath, String nonceHeader, JSONObject params, String keyHeader) {
         try {
             URI requestUri = Mockito.mock(URI.class);
             when(requestUri.getPath()).thenReturn(requestPath);
@@ -743,10 +952,11 @@ class APIUnitTest {
                     Mockito.mock(
                             HttpRequestHeader.class, withSettings().strictness(Strictness.LENIENT));
             when(request.getURI()).thenReturn(requestUri);
-            when(request.getHeader(HttpHeader.X_ZAP_API_NONCE)).thenReturn(nonce);
+            when(request.getHeader(HttpHeader.X_ZAP_API_NONCE)).thenReturn(nonceHeader);
+            when(request.getHeader(HttpHeader.X_ZAP_API_KEY)).thenReturn(keyHeader);
             when(request.getSenderAddress())
                     .thenReturn(Inet4Address.getByAddress(new byte[] {127, 0, 0, 1}));
-            return api.hasValidKey(request, new JSONObject());
+            return api.hasValidKey(request, params);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
